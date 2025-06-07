@@ -1,7 +1,7 @@
 package com.ritik.vidvaultaws2;
 
-
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
@@ -16,9 +16,8 @@ import software.amazon.awssdk.services.s3.presigner.model.PresignedGetObjectRequ
 import java.io.IOException;
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 public class S3Service {
@@ -26,7 +25,7 @@ public class S3Service {
     @Autowired private S3Client s3Client;
     @Autowired private S3Presigner s3Presigner;
     @Autowired private VideoRepo videoRepo;
-    @Value("${aws.s3.bucket}") private String bucketName; // TODO
+    @Value("${aws.s3.bucket}") private String bucketName;
 
     public ResponseEntity<Map<String, String>> upload(MultipartFile file) {
         String originalFileName = file.getOriginalFilename();
@@ -83,6 +82,11 @@ public class S3Service {
                     .key(key)
                     .build();
             s3Client.deleteObject(deleteRequest);
+
+            // Remove from DB
+            Video video = videoRepo.findByKey(key);
+            if (video != null) videoRepo.delete(video);
+
             result.put("message", "Video deleted");
             return new ResponseEntity<>(result, HttpStatus.OK);
         } catch (S3Exception e) {
@@ -90,5 +94,43 @@ public class S3Service {
             return new ResponseEntity<>(result, HttpStatus.INTERNAL_SERVER_ERROR);
         }
     }
-}
 
+    // *** New: List all videos with original name and date ***
+    public List<Map<String, Object>> listAllVideos() {
+        return videoRepo.findAll().stream()
+                .sorted(Comparator.comparing(Video::getUploadedAt).reversed())
+                .map(video -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("title", video.getTitle());
+                    map.put("uploadedAt", video.getUploadedAt());
+                    map.put("key", video.getKey());
+                    map.put("sizeMB", video.getFileSize());
+                    return map;
+                })
+                .collect(Collectors.toList());
+    }
+
+    // Extra: Get meta for a single video
+    public Map<String, Object> getVideoMeta(String key) {
+        Video v = videoRepo.findByKey(key);
+        if (v == null) return null;
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("title", v.getTitle());
+        meta.put("uploadedAt", v.getUploadedAt());
+        meta.put("sizeMB", v.getFileSize());
+        meta.put("contentType", v.getContentType());
+        meta.put("key", v.getKey());
+        return meta;
+    }
+
+    // Extra: Clean up old videos (e.g., > 30 days)
+    public int deleteOldVideos(int days) {
+        List<Video> old = videoRepo.findAll().stream()
+                .filter(v -> v.getUploadedAt().isBefore(LocalDateTime.now().minusDays(days)))
+                .collect(Collectors.toList());
+        for (Video v : old) {
+            deleteVideo(v.getKey());
+        }
+        return old.size();
+    }
+}
